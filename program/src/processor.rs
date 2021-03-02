@@ -8,18 +8,20 @@ use solana_program::{
     pubkey::Pubkey,
     sysvar::{rent::Rent, Sysvar},
     system_instruction,
-    native_token::sol_to_lamports
+    native_token::sol_to_lamports,
+    clock::UnixTimestamp,
 };
-
-use spl_token::state::Account as TokenAccount;
+use std::mem::size_of;
 
 use crate::{
     error::StepError,
     instruction::StepInstruction,
     state::StepProgramState,
     state::Pool,
+    state::Stream,
     state::MAX_SEED_SIZE_BYTES,
-    state::UserAccount
+    state::UserAccount,
+    state::PubkeyData
 };
 
 pub struct Processor;
@@ -44,6 +46,15 @@ impl Processor {
                 msg!("Instruction: Deposit");
                 Self::process_deposit(accounts, program_id, amount)
             }
+            StepInstruction::CreateStream { input_token_pubkey, output_token_pubkey, interval_days, amount } => {
+                msg!("Instruction: Create Stream");
+                Self::process_create_stream(accounts,
+                                            program_id,
+                                            input_token_pubkey,
+                                            output_token_pubkey,
+                                            interval_days,
+                                            amount)
+            }
             StepInstruction::Execute { pda_seed } => {
                 msg!("Instruction: Execute Trade");
                 Self::process_trade(accounts, program_id, pda_seed)
@@ -51,6 +62,9 @@ impl Processor {
         }
     }
 
+    //================================
+    // Initialize Program
+    //================================
     fn process_init_program(
         accounts: &[AccountInfo],
         program_id: &Pubkey,
@@ -107,7 +121,9 @@ impl Processor {
         Ok(())
     }
 
-
+    //================================
+    // Initialize Pool
+    //================================
     fn process_init_pool(
         accounts: &[AccountInfo],
         program_id: &Pubkey,
@@ -127,7 +143,7 @@ impl Processor {
             return Err(ProgramError::MissingRequiredSignature);
         }
 
-        let token_account_seed = b"seedy";
+        let token_account_seed = b"seedy"; // TODO: not hardcode this. each pool will have its own unique ID
         let (pda_token_account, seed_nonce) = Pubkey::find_program_address(&[token_account_seed], program_id);
 
         if pda_token_account != *program_token_account.key {
@@ -215,13 +231,15 @@ impl Processor {
             is_initialized: true,
             mint_pubkey: mint_info.key.to_bytes(),
             pda_seed: pool_pda_seed,
-            user_account: UserAccount{balance:0}
+            head_user: [0; size_of::<PubkeyData>()]
         }.pack_into_slice(&mut pool_account.data.borrow_mut());
 
         Ok(())
     }
 
-
+    //================================
+    // Deposit
+    //================================
     fn process_deposit(
         accounts: &[AccountInfo],
         _program_id: &Pubkey,
@@ -236,6 +254,7 @@ impl Processor {
         }
 
         let depositor_token_account = next_account_info(account_info_iter)?;
+        let user_step_pool_account = next_account_info(account_info_iter)?;
         let pool_info_account = next_account_info(account_info_iter)?;
         let program_token_account = next_account_info(account_info_iter)?;
         let token_program = next_account_info(account_info_iter)?;
@@ -262,12 +281,68 @@ impl Processor {
         )?;
 
         let mut pool_state = Pool::unpack_unchecked(&pool_info_account.data.borrow())?;
-        pool_state.user_account.balance += amount;
-        Pool::pack(pool_state, &mut pool_info_account.data.borrow_mut())?;
+
+        if pool_state.head_user == [0; size_of::<PubkeyData>()] {
+            // First user depositing so setup the head of list
+            pool_state.head_user = user_step_pool_account.key.to_bytes();
+            Pool::pack(pool_state, &mut pool_info_account.data.borrow_mut())?;
+        }
+
+        let mut user_account = UserAccount::unpack_unchecked(&user_step_pool_account.data.borrow())?;
+        user_account.balance += amount;
+        UserAccount::pack(user_account, &mut user_step_pool_account.data.borrow_mut())?;
 
         Ok(())
     }
 
+    //================================
+    // Create Stream
+    //================================
+    fn process_create_stream(
+        accounts: &[AccountInfo],
+        _program_id: &Pubkey,
+        input_token_pubkey: PubkeyData,
+        output_token_pubkey: PubkeyData,
+        interval_days: UnixTimestamp,
+        amount: u64
+    ) -> ProgramResult {
+
+        let account_info_iter = &mut accounts.iter();
+        let user = next_account_info(account_info_iter)?;
+
+        if !user.is_signer {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+
+        let user_step_pool_account = next_account_info(account_info_iter)?;
+        let step_pool_info_account = next_account_info(account_info_iter)?;
+        let new_stream_account = next_account_info(account_info_iter)?;
+        let last_user_stream = next_account_info(account_info_iter)?;
+
+        let mut user_account = UserAccount::unpack_unchecked(&user_step_pool_account.data.borrow())?;
+
+        // Check if user has any streams
+        if user_account.head_stream == [0; size_of::<PubkeyData>()] {
+            // User has no streams yet. Set the head to the new stream.
+            user_account.head_stream = new_stream_account.key.to_bytes();
+        }
+        else {
+            let mut last_stream = Stream::unpack_unchecked(&last_user_stream.data.borrow())?;
+            last_stream.next_stream = new_stream_account.key.to_bytes();
+        }
+
+        Stream::new(input_token_pubkey,
+                    output_token_pubkey,
+                    [0; size_of::<PubkeyData>()],
+                    interval_days,
+                    amount).pack_into_slice(&mut new_stream_account.data.borrow_mut());
+
+        Ok(())
+    }
+
+    //================================
+    // Execute Trade
+    //================================
     fn process_trade(
         accounts: &[AccountInfo],
         program_id: &Pubkey,
@@ -285,8 +360,6 @@ impl Processor {
         let step_program = next_account_info(account_info_iter)?;
         let swap_info = next_account_info(account_info_iter)?;
         let authority_info = next_account_info(account_info_iter)?;
-        //let user_transfer_authority_info = next_account_info(account_info_iter)?;
-        //let source_info = next_account_info(account_info_iter)?;
         let swap_source_info = next_account_info(account_info_iter)?;
         let swap_destination_info = next_account_info(account_info_iter)?;
         let destination_info = next_account_info(account_info_iter)?;
@@ -295,27 +368,13 @@ impl Processor {
 
         let host_fee_account: std::option::Option<&Pubkey> = None;
 
-
-        /*msg!("deployer: {}", deployer.key);
-        msg!("program_token_account: {}", deployer.key);
-        msg!("pda_token_account: {}", pda_token_account);
-        msg!("token_swap_program: {}", token_swap_program.key);
-        msg!("token_program: {}", token_program.key);
-        msg!("authority_info: {}", authority_info.key);
-        msg!("swap_source_info: {}", swap_source_info.key);
-        msg!("swap_destination_info: {}", swap_destination_info.key);
-        msg!("destination_info: {}", destination_info.key);
-        msg!("pool_mint_info: {}", pool_mint_info.key);
-        msg!("pool_fee_account_info: {}", pool_fee_account_info.key);*/
-
         let trade_amount: u64 = sol_to_lamports(2.0);
-
 
         let signer_seeds: &[&[_]] = &[
             token_account_seed, &[seed_nonce]
         ];
 
-       // msg!("Approving transfer");
+        // msg!("Approving transfer");
         let approve_ix = spl_token::instruction::approve(
             &spl_token::id(),
             &program_token_account.key,
@@ -380,51 +439,4 @@ impl Processor {
 
         Ok(())
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::instruction::*;
-    use solana_program::{
-        account_info::IntoAccountInfo, clock::Epoch, instruction::Instruction, sysvar::rent,
-    };
-    use solana_sdk::account::{
-        create_account, create_is_signer_account_infos, Account as SolanaAccount,
-    };
-
-    fn do_process_instruction(
-        instruction: Instruction,
-        accounts: Vec<&mut SolanaAccount>,
-    ) -> ProgramResult {
-        let mut meta = instruction
-            .accounts
-            .iter()
-            .zip(accounts)
-            .map(|(account_meta, account)| (&account_meta.pubkey, account_meta.is_signer, account))
-            .collect::<Vec<_>>();
-
-        let account_infos = create_is_signer_account_infos(&mut meta);
-        Processor::process(&instruction.program_id, &account_infos, &instruction.data)
-    }
-/*
-    #[test]
-    fn test_initialize_mint_account() {
-        let program_id = Pubkey::new_unique();
-        let mut rent_sysvar = rent_sysvar();
-
-        // account is not rent exempt
-        assert_eq!(
-            Err(TokenError::NotRentExempt.into()),
-            do_process_instruction(
-                initialize_account(&program_id, &account_key, &mint_key, &owner_key).unwrap(),
-                vec![
-                    &mut account_account,
-                    &mut mint_account,
-                    &mut owner_account,
-                    &mut rent_sysvar
-                ],
-            )
-        );
-    }*/
 }

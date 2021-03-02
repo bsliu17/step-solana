@@ -121,7 +121,7 @@ async function main() {
         { pubkey: poolToken, isSigner: false, isWritable: true },
         { pubkey: SWAP_PROGRAM_OWNER_FEE_ADDRESS, isSigner: false, isWritable: true },
       ],
-      data: Buffer.from(Uint8Array.of(3, ...POOL_INFO_SEED))
+      data: Buffer.from(Uint8Array.of(4, ...POOL_INFO_SEED))
   })
 
   let tx = new Transaction()

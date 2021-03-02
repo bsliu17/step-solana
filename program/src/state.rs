@@ -7,6 +7,11 @@ use solana_program::{
     msg
 };
 
+use std::mem::size_of;
+
+// Wrapper for Pubkey for use with Borsh
+pub type PubkeyData = [u8; 32];
+
 #[derive(Clone, Debug, BorshSerialize, BorshDeserialize, BorshSchema, PartialEq)]
 pub struct StepProgramState {
     pub is_initialized: bool,
@@ -43,10 +48,27 @@ impl Pack for StepProgramState {
 
 #[derive(Clone, Debug, BorshSerialize, BorshDeserialize, BorshSchema, PartialEq)]
 pub struct Stream {
-    pub input_token_pubkey: [u8; 32],
-    pub output_token_pubkey: [u8; 32],
-    pub interval_days: u16,
+    pub input_token_pubkey: PubkeyData,
+    pub output_token_pubkey: PubkeyData,
+    pub next_stream: PubkeyData,
+    pub interval_days: UnixTimestamp,
     pub amount: u64
+}
+
+impl Stream {
+    pub fn new(input_token_pubkey: PubkeyData,
+               output_token_pubkey: PubkeyData,
+               next_stream: PubkeyData,
+               interval_days: UnixTimestamp,
+               amount: u64) -> Self {
+        Self {
+            input_token_pubkey: input_token_pubkey,
+            output_token_pubkey: output_token_pubkey,
+            next_stream: next_stream,
+            interval_days: interval_days,
+            amount: amount
+        }
+    }
 }
 
 impl Sealed for Stream {}
@@ -73,7 +95,19 @@ impl Pack for Stream {
 
 #[derive(Clone, Debug, BorshSerialize, BorshDeserialize, BorshSchema, PartialEq)]
 pub struct UserAccount {
-    pub balance: u64
+    pub balance: u64,
+    pub next_user: PubkeyData,
+    pub head_stream: PubkeyData,
+}
+
+impl UserAccount {
+    pub fn new() -> Self {
+        Self {
+            balance: 0,
+            next_user: [0; size_of::<PubkeyData>()],
+            head_stream: [0; size_of::<PubkeyData>()]
+        }
+    }
 }
 
 impl Sealed for UserAccount {}
@@ -104,9 +138,9 @@ pub const MAX_SEED_SIZE_BYTES: usize = 32;
 #[derive(Clone, Debug, BorshSerialize, BorshDeserialize, BorshSchema, PartialEq)]
 pub struct Pool {
     pub is_initialized: bool,
-    pub mint_pubkey: [u8; 32],
+    pub mint_pubkey: PubkeyData,
     pub pda_seed: [u8; MAX_SEED_SIZE_BYTES],
-    pub user_account: UserAccount // TOTAL HACK FOR NOW ONLY SUPPORT ONE USER - use linked list after hackathon
+    pub head_user: PubkeyData
 }
 
 impl Sealed for Pool {}

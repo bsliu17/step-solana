@@ -1,7 +1,15 @@
-use solana_program::program_error::ProgramError;
+use solana_program::{
+    clock::UnixTimestamp,
+    program_error::ProgramError,
+    program_pack::Pack
+};
 use std::convert::TryInto;
 
 use crate::error::StepError::InvalidInstruction;
+use crate::state::{
+    Stream,
+    PubkeyData
+};
 
 pub enum StepInstruction {
     /// One-time initialization called by the deployer to set some global program states
@@ -35,13 +43,31 @@ pub enum StepInstruction {
     /// Accounts expected:
     ///
     /// 0. `[signer]` The account of the user depositing funds.
-    /// 1. `[]` Depositors token account where source of funds come from.
-    /// 2. `[writable]` The PDA of pool state account.
-    /// 3. `[writable]` The PDA of the pools token account.
-    /// 4. `[]` Token Program.
+    /// 1. `[writable]` Depositors pool user account.
+    /// 2. `[]` Depositors token account where source of funds come from.
+    /// 4. `[writable]` The PDA of pool state account.
+    /// 5. `[writable]` The PDA of the pools token account.
+    /// 6. `[]` Token Program.
     Deposit {
         /// The amount user wants to deposit
         amount: u64,
+    },
+    /// Creates a new stream.
+    /// A stream defines the asset pair to swap and at what interval.
+    ///
+    ///
+    /// Accounts expected:
+    ///
+    /// 0. `[signer]` The account of the user.
+    /// 1. `[writable]` The users pool account.
+    /// 2. `[writable]` The PDA of pool state account.
+    /// 4. `[writable]` The new stream account.
+    /// 5. `[]` The last stream in the linked list.
+    CreateStream {
+        input_token_pubkey: PubkeyData,
+        output_token_pubkey: PubkeyData,
+        interval_days: UnixTimestamp,
+        amount: u64
     },
     /// Execute a trade
     ///
@@ -49,12 +75,17 @@ pub enum StepInstruction {
     /// Accounts expected:
     ///
     /// 0. `[signer]` The account of deployer.
-    /// 1. `[]` The PDA of program state account.
-    /// 2. `[writable]` The PDA of the pools token account.
-    /// 3. `[]` Mint.
-    /// 4. `[]` System Program.
-    /// 5. `[]` Token Program.
-    /// 6. `[]` Rent sysvar.
+    /// 1. `[writable]` The PDA of programs token account.
+    /// 2. `[]` Token swap program.
+    /// 3. `[]` Token program.
+    /// 4. `[]` Step Program.
+    /// 5. `[]` The Swap info account.
+    /// 6. `[]` Mint authority for the Pool LP token.
+    /// 7. `[writable]` Token A account for SOURCE.
+    /// 8. `[writable]` Token B account for DESTINATION.
+    /// 9. `[writable]` DESTINATION Token Account.
+    /// 10. `[writable]` The Pool LP token account.
+    /// 11.`[writable]` The swap program owner fee address.
     Execute {
         pda_seed: [u8; 32]
     }
@@ -74,7 +105,16 @@ impl StepInstruction {
             2 => Self::Deposit {
                 amount: Self::unpack_amount(rest)?,
             },
-            3 => Self::Execute {
+            3 => {
+                let s = Stream::unpack_from_slice(rest)?;
+                Self::CreateStream {
+                    input_token_pubkey: s.input_token_pubkey,
+                    output_token_pubkey: s.output_token_pubkey,
+                    interval_days: s.interval_days,
+                    amount: s.amount
+                }
+            },
+            4 => Self::Execute {
                 pda_seed: Self::unpack_pda_seed(rest)?
             },
             _ => return Err(InvalidInstruction.into()),
